@@ -21,8 +21,10 @@ import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+import matplotlib.lines as mlines
 
 from sklearn import preprocessing
+import scipy as sp
 
 from . import utils
 from . import timeseries
@@ -1090,7 +1092,7 @@ def plot_turnover(returns, transactions, positions,
 
 
 def plot_slippage_sweep(returns, transactions, positions,
-                        slippage_params=(3, 8, 10, 12, 15, 20, 50),
+                        slippage_params=(3, 6, 8, 10, 12, 15, 20, 50),
                         ax=None, **kwargs):
     """Plots a equity curves at different per-dollar slippage assumptions.
 
@@ -1326,3 +1328,55 @@ def show_worst_drawdown_periods(returns, top=5):
     drawdown_df['net drawdown in %'] = list(
         map(utils.round_two_dec_places, drawdown_df['net drawdown in %']))
     print(drawdown_df.sort('net drawdown in %', ascending=False))
+
+
+def plot_trade_life_times(trades, ax=None):
+    if ax is None:
+        ax = plt.subplot()
+
+    symbols = trades.symbol.unique()
+    symbol_idx = pd.Series(np.arange(len(symbols)), index=symbols)
+    colors = sns.color_palette(n_colors=len(symbols))
+
+    for color, (symbol, trade) in zip(colors, trades.groupby('symbol')):
+        for _, row in trade.iterrows():
+            c = 'b' if row.long else 'r'
+            y_ix = symbol_idx[symbol]
+            ax.plot([row['open'], row['close']],
+                    [y_ix, y_ix], color=c)
+
+    ax.set_yticklabels(symbols)
+
+    red_line = mlines.Line2D([], [], color='r', label='Long')
+    blue_line = mlines.Line2D([], [], color='b', label='Short')
+    ax.legend(handles=[red_line, blue_line], loc=0)
+
+
+def show_profit_attribtion(trades):
+
+    total_pnl = trades['pnl'].sum()
+    pct_profit_attribution = trades.groupby('symbol')['pnl'].sum() / total_pnl
+
+    print('\nProfitability (PnL / PnL total) per name:')
+    print(pct_profit_attribution.sort(inplace=False, ascending=False))
+
+
+def plot_prob_profit_trade(txn_descr, ax=None):
+
+    x = np.linspace(0, 1., 500)
+    dist = sp.stats.beta(txn_descr.profitable.sum(),
+                         (~txn_descr.profitable).sum())
+    y = dist.pdf(x)
+    lower_perc = dist.ppf(.025)
+    upper_perc = dist.ppf(.975)
+
+    lower_plot = dist.ppf(.001)
+    upper_plot = dist.ppf(.999)
+    if ax is None:
+        ax = plt.subplot()
+    ax.plot(x, y)
+    ax.axvline(lower_perc, color='0.5')
+    ax.axvline(upper_perc, color='0.5')
+
+    ax.set(xlabel='Probability making a profitable decision', ylabel='Belief',
+           xlim=(lower_plot, upper_plot), ylim=(0, y.max() + 1.))

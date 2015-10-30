@@ -121,10 +121,13 @@ def create_full_tear_sheet(returns, positions=None, transactions=None,
         returns = returns[returns.index > benchmark_rets.index[0]]
 
     if slippage is not None and transactions is not None:
-        turnover = txn.get_turnover(transactions, positions,
+        transactions_daily = txn.get_txn_vol(transactions)
+        turnover = txn.get_turnover(transactions_daily, positions,
                                     period=None, average=False)
+
         unadjusted_returns = returns.copy()
         returns = txn.adjust_returns_for_slippage(returns, turnover, slippage)
+
     else:
         unadjusted_returns = None
 
@@ -150,6 +153,8 @@ def create_full_tear_sheet(returns, positions=None, transactions=None,
             create_txn_tear_sheet(returns, positions, transactions,
                                   unadjusted_returns=unadjusted_returns,
                                   set_context=set_context)
+            create_profit_attr_tear_sheet(transactions, positions,
+                                          sector_mappings=sector_mappings)
 
     if bayesian:
         create_bayesian_tear_sheet(returns,
@@ -348,7 +353,7 @@ def create_position_tear_sheet(returns, positions, gross_lev=None,
         If True, returns the figure that was plotted on.
     set_context : boolean, optional
         If True, set default plotting style context.
-    sector_mapping: dict or pd.Series, optional
+    sector_mappings: dict or pd.Series, optional
         Security identifier to sector mapping.
         Security ids as keys, sectors as values.
     """
@@ -423,33 +428,107 @@ def create_txn_tear_sheet(returns, positions, transactions,
     ax_daily_volume = plt.subplot(gs[1, :], sharex=ax_turnover)
     ax_turnover_hist = plt.subplot(gs[2, :])
 
+    transactions_daily = txn.get_txn_vol(transactions)
+
     plotting.plot_turnover(
         returns,
-        transactions,
+        transactions_daily,
         positions,
         ax=ax_turnover)
 
-    plotting.plot_daily_volume(returns, transactions, ax=ax_daily_volume)
+    plotting.plot_daily_volume(returns, transactions_daily, ax=ax_daily_volume)
 
     try:
-        plotting.plot_daily_turnover_hist(transactions, positions,
+        plotting.plot_daily_turnover_hist(transactions_daily, positions,
                                           ax=ax_turnover_hist)
-    except AttributeError:
+    except:
         warnings.warn('Unable to generate turnover plot.', UserWarning)
 
     if unadjusted_returns is not None:
         ax_slippage_sweep = plt.subplot(gs[3, :])
         plotting.plot_slippage_sweep(unadjusted_returns,
-                                     transactions,
+                                     transactions_daily,
                                      positions,
                                      ax=ax_slippage_sweep
                                      )
         ax_slippage_sensitivity = plt.subplot(gs[4, :])
         plotting.plot_slippage_sensitivity(unadjusted_returns,
-                                           transactions,
+                                           transactions_daily,
                                            positions,
                                            ax=ax_slippage_sensitivity
                                            )
+
+    plt.show()
+    if return_fig:
+        return fig
+
+
+@plotting_context
+def create_profit_attr_tear_sheet(transactions, positions,
+                                  sector_mappings=None,
+                                  return_fig=False):
+    transactions['txn_dollars'] =  \
+        -transactions['amount'] * transactions['price']
+    trades = txn.extract_roundtrips(transactions)
+
+    if len(trades) < 10:
+        warnings.warn(
+            'Fewer than 10 round-trip trades made. Aborting.', UserWarning)
+        return
+
+    ndays = len(positions)
+    trades_abs = trades.copy()
+    trades_abs['dollar_volume'] = trades_abs['dollar_volume'].abs()
+
+    print(trades_abs.drop(['open', 'close'], axis='columns').describe())
+    print('Percent of trades profitable = {:.4}%'.format(
+        trades.profitable.mean() * 100))
+
+    winning_trades = trades[trades.pnl > 0]
+    losing_trades = trades[trades.pnl < 0]
+    print('Mean profits per winning trade = {:.4}'.format(
+        winning_trades.pnl.mean()))
+    print('Mean loss per losing trade = {:.4}').format(
+        losing_trades.pnl.abs().mean())
+
+    print('A decision is made every {:.4} days.'.format(ndays / len(trades)))
+    print('{:.4} trading decisions per day.'.format(len(trades) * 1. / ndays))
+    print('{:.4} trading decisions per month.'.format(
+        len(trades) * 1. / (ndays / 21)))
+
+    plotting.show_profit_attribtion(trades)
+
+    if sector_mappings is not None:
+        sector_trades = txn.apply_sector_mappings_to_trades(trades, sector_mappings)
+        plotting.show_profit_attribtion(sector_trades)
+
+    fig = plt.figure(figsize=(14, 3 * 6))
+
+    fig = plt.figure(figsize=(14, 3 * 6))
+    gs = gridspec.GridSpec(3, 2, wspace=0.5, hspace=0.5)
+
+    ax_trade_lifetimes = plt.subplot(gs[0, :])
+    ax_prob_profit_trade = plt.subplot(gs[1, 0])
+    ax_holding_time = plt.subplot(gs[1, 1])
+    ax_pnl_per_round_trip_dollars = plt.subplot(gs[2, 0])
+    ax_pnl_per_round_trip_pct = plt.subplot(gs[2, 1])
+
+    plotting.plot_trade_life_times(trades, ax=ax_trade_lifetimes)
+
+    plotting.plot_prob_profit_trade(trades, ax=ax_prob_profit_trade)
+
+    trade_holding_times = [x.days for x in trades['duration']]
+    sns.distplot(trade_holding_times, kde=False, ax=ax_holding_time)
+    ax_holding_time.set(xlabel='holding time in days')
+
+    sns.distplot(trades.pnl, kde=False, ax=ax_pnl_per_round_trip_dollars)
+    ax_pnl_per_round_trip_dollars.set(xlabel='PnL per round-trip trade in $')
+
+    pnl_pct = trades.pnl / trades.pnl.sum() * 100
+    sns.distplot(pnl_pct, kde=False, ax=ax_pnl_per_round_trip_pct)
+    ax_pnl_per_round_trip_pct.set(xlabel='PnL per round-trip trade in % of total profit')
+
+    gs.tight_layout(fig)
 
     plt.show()
     if return_fig:

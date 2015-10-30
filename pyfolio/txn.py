@@ -17,6 +17,9 @@ from __future__ import division
 from collections import defaultdict
 
 import pandas as pd
+import numpy as np
+
+import warnings
 
 
 def map_transaction(txn):
@@ -98,6 +101,7 @@ def get_txn_vol(transactions):
         Daily transaction volume and number of shares.
          - See full explanation in tears.create_full_tear_sheet.
     """
+    transactions.index = transactions.index.normalize()
 
     amounts = transactions.amount.abs()
     prices = transactions.price
@@ -158,8 +162,7 @@ def create_txn_profits(transactions):
     for symbol, transactions_sym in transactions.groupby('symbol'):
         transactions_sym = transactions_sym.reset_index()
 
-        for i, (amount, price, dt) in transactions_sym.iloc[1:][
-                ['amount', 'price', 'date_time_utc']].iterrows():
+        for i, (amount, price, dt) in transactions_sym.iloc[1:][['amount', 'price', 'date_time_utc']].iterrows():
             prev_amount, prev_price, prev_dt = transactions_sym.loc[
                 i - 1, ['amount', 'price', 'date_time_utc']]
             profit = (price - prev_price) * -amount
@@ -173,6 +176,107 @@ def create_txn_profits(transactions):
     profits_dts = pd.DataFrame(txn_descr)
 
     return profits_dts
+
+
+def extract_roundtrips(transactions):
+    transactions_split = split_trades(transactions)
+
+    txn_descr = defaultdict(list)
+
+    for sym, trans_sym in transactions_split.groupby('symbol'):
+        amount_cumsum = trans_sym.amount.cumsum()
+        assert np.all(np.abs(np.diff(np.sign(amount_cumsum)))
+                      != 2), "Not all trades end on 0."
+        exit_idx = np.where(amount_cumsum == 0)[0] + 1
+
+        for trade_start, trade_end in zip(exit_idx, exit_idx[1:]):
+            txn = trans_sym.iloc[trade_start:trade_end]
+
+            if len(txn) == 0:
+                continue
+
+            pnl = txn.txn_dollars.sum()
+
+            assert txn.amount.sum() == 0
+
+            txn_descr['pnl'].append(pnl)
+            txn_descr['symbol'].append(sym)
+
+            txn_descr['duration'].append(txn.index[-1] - txn.index[0])
+
+            txn_descr['open'].append(txn.index[0])
+            txn_descr['close'].append(txn.index[-1])
+            txn_descr['long'].append(txn.amount.iloc[0] > 0)
+
+    if len(txn_descr) == 0:
+        warnings.warn('No round-trip trades found. Aborting.', UserWarning)
+        return pd.DataFrame([])
+
+    txn_descr = pd.DataFrame(txn_descr)
+    txn_descr['profitable'] = txn_descr.pnl > 0
+    txn_descr['dollar_volume'] = txn_descr.pnl.abs()
+
+    return txn_descr
+
+
+def split_trades(transactions):
+    trans_split = []
+    for sym, trans_sym in transactions.groupby('symbol'):
+        trans_sym.sort()
+
+        while True:
+            cum_amount = trans_sym.amount.cumsum()
+            sign_flip = np.where(np.abs(np.diff(np.sign(cum_amount))) == 2)[0]
+
+            if len(sign_flip) == 0:
+                break  # all sign flips are converted
+
+            sign_flip = sign_flip[0] + 2
+
+            txn = trans_sym.iloc[:sign_flip]
+
+            left_over_txn_amount = txn.amount.sum()
+
+            assert left_over_txn_amount != 0
+
+            split_txn_1 = txn.iloc[[-1]].copy()
+            split_txn_2 = txn.iloc[[-1]].copy()
+
+            split_txn_1['amount'] -= left_over_txn_amount
+            split_txn_2['amount'] = left_over_txn_amount
+
+            # Recompute rest of transaction
+            split_txn_1['txn_dollars'] = - \
+                split_txn_1['amount'] * split_txn_1['price']
+            split_txn_2['txn_dollars'] = - \
+                split_txn_2['amount'] * split_txn_2['price']
+
+            # Delay 2nd trade by a second to avoid overlapping indices
+            split_txn_2.index += pd.Timedelta(seconds=1)
+
+            assert split_txn_1.amount.iloc[
+                0] + split_txn_2.amount.iloc[0] == txn.iloc[-1].amount
+            assert trans_sym.iloc[
+                :sign_flip - 1].amount.sum() + split_txn_1.amount.iloc[0] == 0
+
+            # Recreate transactions so far with split transaction
+            trans_sym = pd.concat([trans_sym.iloc[
+                                  :sign_flip - 1], split_txn_1, split_txn_2, trans_sym.iloc[sign_flip:]])
+
+        assert np.all(np.abs(np.diff(np.sign(trans_sym.amount.cumsum()))) != 2)
+        trans_split.append(trans_sym)
+
+    transactions_split = pd.concat(trans_split)
+
+    return transactions_split
+
+
+def apply_sector_mappings_to_trades(trades, sector_mappings):
+    sector_trades = trades.copy()
+    sector_trades.symbol = sector_trades.symbol.apply(lambda x: sector_mappings.get(x, np.nan))
+    sector_trades = sector_trades.dropna(axis=0)
+
+    return sector_trades
 
 
 def get_turnover(transactions, positions, period=None, average=True):
@@ -214,4 +318,6 @@ def get_turnover(transactions, positions, period=None, average=True):
     # this is divided by 2.0 to get the average of the two.
     turnover = traded_value / 2.0 if average else traded_value
     turnover_rate = turnover / portfolio_value
+
+    turnover_rate = turnover_rate.fillna(0)
     return turnover_rate
